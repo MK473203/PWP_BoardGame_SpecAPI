@@ -4,17 +4,8 @@ import threading
 import time
 import json
 import pika
-from flask import Flask, Response
-
-
-BOARDGAME_SERVER = "http://localhost:5000"
-MASON = "application/vnd.mason+json"
-
-RABBITMQ_BROKER_URL = "amqp://guest:guest@localhost:5672/%2F?connection_attempts=3&heartbeat=3600"
-
-app = Flask(__name__)
-
-workers = []
+from flask import Response, Blueprint
+from specAPI import BOARDGAME_SERVER, GAMES_HREF, MASON, RABBITMQ_BROKER_URL, workers, exit
 
 
 """
@@ -28,17 +19,24 @@ Overall system schema:
 
 """
 
+api_bp = Blueprint("api", __name__, url_prefix="")
 
 class SpectatorWorker():
 
     def __init__(self, game_uuid: str):
         self.game_uuid = game_uuid
-        self.game_url = BOARDGAME_SERVER + "/api/games/" + game_uuid
+        self.game_url = BOARDGAME_SERVER + GAMES_HREF + game_uuid
         self.game_json = None
         self.connection = None
         self.channel = None
+        self.client_recently_joined = False
 
-        resp = requests.get(self.game_url)
+        try:
+            resp = requests.get(self.game_url, timeout=10)
+        except requests.Timeout:
+            self.log("Could not get response from server")
+            self.game_found = False
+            return
 
         if resp.status_code == 200:
             self.game_found = True
@@ -51,22 +49,31 @@ class SpectatorWorker():
     def log(self, message):
         print("Worker " + self.game_uuid[0:5] + ": " + message, flush=True)
 
+    def close(self):
+        self.log("Shutting down")
+        self.connection.close()
+    """
+    def on_join(self, _channel, basic_deliver, properties, body):
+        self.client_recently_joined = True
+    """
     def on_open(self, connection):
-        self.channel = connection.channel()
+        self.log("Opening connection")
+        self.channel = self.connection.channel()
         self.channel.exchange_declare(
             exchange=self.game_uuid,
             exchange_type="fanout"
         )
-
-    def close(self):
-        self.log("Shutting down")
-        self.connection.close()
+        """
+        self.channel.queue_declare(queue="join_notifications")
+        self.channel.basic_consume(
+            queue="join_notifications", on_message_callback=self.on_join)
+        """
 
     def run(self):
-        self.connection = pika.BlockingConnection(
-            pika.URLParameters(RABBITMQ_BROKER_URL))
+        self.log("Starting")
+        self.connection = pika.BlockingConnection(parameters=pika.URLParameters(RABBITMQ_BROKER_URL))
         self.on_open(self.connection)
-        while self.connection.is_open:
+        while self.connection.is_open and not exit.is_set():
 
             resp = requests.get(self.game_url)
 
@@ -91,13 +98,13 @@ class SpectatorWorker():
                 self.close()
 
 
-@app.route("/spectate/<string:game>")
+@api_bp.route("/spectate/<string:game>")
 def spectate_game(game):
     global workers
 
     worker = None
 
-    for w in workers:
+    for w, _ in workers:
         if w.game_uuid == game:
             worker = w
             break
@@ -107,9 +114,10 @@ def spectate_game(game):
         worker = SpectatorWorker(game)
 
     if worker.game_found:
-        thread = threading.Thread(target=worker.run)
+        thread = threading.Thread(
+            target=worker.run, name="Worker " + worker.game_uuid[0:5])
         thread.start()
-        workers.append(worker)
+        workers.append((worker, thread))
 
         resp = {}
         resp["@controls"] = {}
@@ -124,7 +132,3 @@ def spectate_game(game):
         resp["@controls"] = {}
 
         return Response(response=json.dumps(resp), status=404, mimetype=MASON)
-
-
-if __name__ == "__main__":
-    app.run(port=5001)
