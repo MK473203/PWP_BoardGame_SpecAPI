@@ -1,6 +1,5 @@
 import requests
 import threading
-import atexit
 import os
 from flask import Flask
 

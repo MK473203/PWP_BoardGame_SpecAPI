@@ -114,10 +114,11 @@ def spectate_game(game):
         worker = SpectatorWorker(game)
 
     if worker.game_found:
-        thread = threading.Thread(
-            target=worker.run, name="Worker " + worker.game_uuid[0:5])
-        thread.start()
-        workers.append((worker, thread))
+        if worker.game_uuid not in [w.game_uuid for w, _ in workers]:
+            thread = threading.Thread(
+                target=worker.run, name="Worker " + worker.game_uuid[0:5])
+            thread.start()
+            workers.append((worker, thread))
 
         resp = {}
         resp["@controls"] = {}
